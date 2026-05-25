@@ -59,6 +59,7 @@ disable-model-invocation: false
 
 ## 写入前核对
 
+
 - [ ] 目标接口、摘要已确认
 - [ ] title / method / path / status；TM 头齐全（只追加）
 - [ ] 合同版式：三节标题 + 响应字段表 + Schema（或降级表补全）；异常仅枚举主动分支
