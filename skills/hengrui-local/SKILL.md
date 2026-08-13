@@ -1,81 +1,126 @@
 ---
 name: hengrui-local
-description: 恒瑞本地化接口配置自动化工具。自动完成批量导入接口、生成 SQL 脚本、构建授权请求、生成测试 curl、同步 Confluence 文档和更新应用清单。使用场景：用户需要在恒瑞本地化环境配置接口时调用此 Skill。
+description: 恒瑞本地化接口配置自动化工具。支持用户直接粘贴任意格式接口信息（文本/表格/JSON/Postman导出或提供文件），自动抽取接口列表并构建批量导入接口 curl（serviceId/userId 可为空 ""，由用户补充）；用户回传最终完整 curl 后，按顺序执行批量导入、查询服务名、生成 SQL 脚本、构建授权请求、生成测试 curl、同步 Confluence 文档、更新应用清单。使用场景：用户需要在恒瑞本地化环境配置接口、提供接口清单要求生成批量导入命令、或要求完成接口配置全流程时调用此 Skill。
 ---
 
 # 恒瑞本地化接口配置助手
 
-完全自动化的接口配置工具，一键完成从接口定义到文档更新的全流程。
+**两阶段工作流：**
 
-## 快速开始
-
-### 必填信息收集
-
-向用户确认以下信息：
-
-| 信息项 | 说明 | 示例 |
-|--------|------|------|
-| 应用名称 | 应用英文标识（appCode） | word-template-plus |
-| appId | 应用主键 ID | 2c94ab0a7abdfdd8017ac27095670023 |
-| serviceId | 测试环境服务唯一 ID（32 位十六进制） | 2c94bb8f82c930c20182e46bef280008 |
-| 接口列表 | 接口中文名、后端路径、请求方法 | 见下方模板 |
-
-### 接口信息收集模板
-
-| 接口中文名 | 接口路径 | 请求方法 |
-|------------|----------|----------|
-| 获取文件夹列表 | /external/getFolders | POST |
-| 文件归档 | /external/fileArchive | POST |
-
-**接口路径填写强制规则**
-- 仅填写后端短路径，禁止携带 `/api/{服务名}` 前缀
-- 完整线上地址示例：`https://trial-openapi.hengrui.com/api/word-template-plus/external/getFolders`
-- 录入仅保留：`/external/getFolders`
-- 路径必须以 `/` 开头；不允许空格、`?`、`#`；连续斜杠会自动合并；末尾 `/` 会被网关自动剔除
+- **阶段一（交互）**：接收接口信息（任意格式原文或文件）→ 抽取接口三要素 → 构建批量导入 curl（serviceId / userId 置 `""`）→ 用户补充后回传最终完整 curl
+- **阶段二（执行）**：执行批量导入 → 提取真实 ID → 按顺序完成查询服务名、SQL 脚本、授权请求、测试 curl、Confluence 文档、应用清单
 
 ---
 
-## 工作流程
+## 阶段一：构建批量导入 curl
 
-### 步骤 1：批量导入接口到测试环境
+### 1.1 信息输入说明
 
-**自动执行：**
-1. 构造请求体，调用 API：`POST http://trialos.test.com/api/open/config/route/batchImport`
-2. 从响应提取 `interfaceId` 和 `routeId`
-3. 保存真实 ID 供后续使用
-4. 失败时显示错误并停止
+| 信息项 | 说明 | 处理方式 |
+|--------|------|----------|
+| appCode / 应用名称 | 应用英文标识（如 word-template-plus） | 原文含则提取；缺失则询问 |
+| appId | 应用主键 ID | 原文含则提取；缺失则询问（SQL 脚本需要） |
+| serviceId | 测试环境服务唯一 ID（32 位十六进制） | 可为空字符串 `""`，用户后续自行补充 |
+| userId | 操作人用户 ID（32 位十六进制） | 可为空字符串 `""`；也可使用默认值 `2c948a9c79602d6c017a1cf9ba09005c` |
+| 接口列表 | 接口中文名、后端路径、请求方法 | 必填，至少 1 个；格式不固定，任意格式直接粘贴或提供文件 |
 
-**实现说明（重要！Windows PowerShell 兼容）：**
-- 使用 PowerShell 原生 `Invoke-WebRequest` 命令（不使用 curl）
-- curl 的 `-H` `-d` 参数在 Windows PowerShell 中不被识别
-- 通过 `@{}` 哈希表构造请求头和请求体
-- 使用 `ConvertTo-Json` 确保中文字符正确编码
+接口信息格式不固定，用户可直接**原文粘贴**（聊天记录/表格/文档/JSON/Postman 导出等），或提供文件路径（`.md`/`.txt`/`.csv`/`.json` 等文本格式直接用 Read 读取；`.xlsx` 等二进制格式请用户粘贴内容或另存为 CSV 后粘贴）。**不要要求用户整理成统一模板。**
 
-**请求体结构：**
-```json
-{
-  "serviceId": "{serviceId}",
-  "userId": "2c948a9c79602d6c017a1cf9ba09005c",
-  "routes": [
-    {
-      "nameCN": "{接口中文名}",
-      "path": "{接口路径}",
-      "method": "{请求方法}"
-    }
-  ]
-}
+### 1.2 信息抽取规则
+
+从任意格式原文中抽取接口三要素（nameCN / path / method）：
+
+1. **定位接口列表区域**：忽略寒暄、说明、前后缀文字，聚焦含 HTTP 方法词（`GET`/`POST`/`PUT`/`DELETE`，大小写均可）或路径特征（`/` 开头、含 `http://`/`https://` 的 URL）的内容
+2. **逐条抽取三要素**：
+   - **method**：匹配 `GET`/`POST`/`PUT`/`DELETE`，统一转大写
+   - **path**：
+     - 完整 URL → 仅取路径部分（去掉协议、域名、`?` 后的查询参数、`#` 后的锚点）
+     - 含 `/api/{appCode}` 前缀 → 截掉前缀只保留短路径（如 `https://trial-openapi.hengrui.com/api/word-template-plus/external/getFolders` → `/external/getFolders`）
+     - 裸路径直接使用；缺 `/` 前缀自动补
+   - **nameCN**：优先取中文名（表格"接口名称/接口名/名称"列、行内中文说明等）；同一接口多个候选名时取最贴近业务含义的一个
+3. **缺项处理**：
+   - nameCN 缺失 → 用 `{method} {path}`（如 `POST /external/getFolders`）作占位，并在输出中明确提示用户补充中文名
+   - method 缺失 → 无法推断，必须询问用户
+   - path 缺失 → 无法推断，必须询问用户
+   - 原文信息含糊、无法确定归属的条目 → 列出候选让用户确认后再构建
+4. **去重**：提取后检查 `method:path` 组合，重复的保留一条并提示用户
+
+**常见输入格式示例：**
+
+| 格式 | 示例 |
+|------|------|
+| Markdown / 文本表格 | `获取文件夹列表 \| /external/getFolders \| POST` |
+| 编号列表 | `1. 获取文件夹列表 /external/getFolders POST` |
+| 聊天叙述 | `接口：获取文件夹列表；路径：/external/getFolders；请求方式：POST` |
+| JSON | `{"nameCN": "获取文件夹列表", "path": "/external/getFolders", "method": "POST"}` |
+| Postman / YApi 导出 | 以接口名作标题、含 `method` 与 `url`（可能是完整 URL，需截取短路径） |
+| 仅路径+方法 | `/external/getFolders POST`（nameCN 缺，按缺项处理） |
+
+### 1.3 字段校验规则（生成前必须检查）
+
+1. **method**：仅允许 `GET` / `POST` / `PUT` / `DELETE`（大写，后端正则 `^(GET|POST|PUT|DELETE)$`）；原始小写写法自动转大写
+2. **path**：
+   - 不能为空，不能含空白字符、`?`、`#`
+   - 仅填后端短路径，禁止携带 `/api/{appCode}` 前缀（抽取时已截掉）
+   - 缺少 `/` 前缀自动补上；连续 `//` 会合并；末尾 `/` 会被网关自动剔除
+3. **nameCN**：不能为空，前后空格会被后端自动去除；缺失时按缺项处理补占位
+4. **serviceId / userId**：允许为空字符串 `""`；非空值需为 32 位十六进制主键，否则提示用户
+5. **重复检查**：同一批请求中 `method:path` 组合不能重复
+
+### 1.4 批量导入 curl 模板
+
+```bash
+curl --location --request POST 'http://trialos.test.com/api/open/config/route/batchImport' \
+--header 'Content-Type: application/json;charset=UTF-8' \
+--data-raw '{
+    "serviceId": "{serviceId 或 \"\"}",
+    "userId": "{userId 或 \"\"}",
+    "routes": [
+        {
+            "nameCN": "{接口中文名1}",
+            "path": "{接口路径1}",
+            "method": "{请求方法1}"
+        },
+        {
+            "nameCN": "{接口中文名2}",
+            "path": "{接口路径2}",
+            "method": "{请求方法2}"
+        }
+    ]
+}'
 ```
 
-**PowerShell 实现示例：**
+**说明：**
+- `routes` 数组按抽取结果逐项填充，顺序保持一致；只有一个接口时也要用数组格式
+- serviceId / userId 未提供时填入 `""`，输出后提示用户自行替换
+- 请求体 JSON 字符串用双引号；nameCN 内含双引号需转义为 `\"`
+- 输出完整 curl 时，同时附一份简短"抽取结果摘要"（接口名 / 路径 / 方法逐条列出，serviceId、userId 标注是否为空）便于用户核对
+- 后端会自动生成接口编码（规则：`{method小写}_{path_slug}`，如 `POST /external/getFolders` → `post_external_getfolders`），SQL 脚本中需要用到
+
+### 1.5 等待用户回传（关键检查点）
+
+输出完整 curl 后**停止，等待用户**，不要自行继续：
+
+- 用户补充 serviceId / userId 后回传**最终完整 curl** → 进入阶段二执行
+- 或用户自行执行后回传**响应 JSON** → 进入阶段二（跳过执行步骤）
+
+---
+
+## 阶段二：按顺序执行后续流程
+
+### 步骤 1：执行批量导入
+
+收到用户回传的完整 curl 后执行。Windows PowerShell 中 `curl` 是 `Invoke-WebRequest` 别名、且 `\` 续行不生效，优先转换为等效 PowerShell 脚本执行（或使用 `curl.exe`）：
+
 ```powershell
 $body = @{
-    serviceId = "2c94bb8f82c930c20182e46bef280008"
-    userId = "2c948a9c79602d6c017a1cf9ba09005c"
+    serviceId = "{serviceId}"
+    userId = "{userId}"
     routes = @(
         @{
-            nameCN = "接口中文名"
-            path = "/接口路径"
-            method = "POST"
+            nameCN = "{接口中文名}"
+            path = "{接口路径}"
+            method = "{请求方法}"
         }
     )
 } | ConvertTo-Json -Depth 10
@@ -86,23 +131,24 @@ $response = Invoke-WebRequest -Uri "http://trialos.test.com/api/open/config/rout
   -Body $body
 
 $data = $response.Content | ConvertFrom-Json
-# 从 $data.data[].id 提取 routeId
-# 从 $data.data[].interfaceId 提取 interfaceId
 ```
+
+- 校验 `$data.code -eq 0`；失败时显示 `message` 并停止
+- **提取 ID**：`data[]` 顺序与 `routes[]` 顺序一致，逐项取 `id`（routeId）和 `interfaceId`，与接口一一对应保存，供 SQL 脚本使用
+- 若响应顺序异常，按 data 项中的接口路径 / method 对应回接口
 
 ### 步骤 2：查询服务名称
 
-**自动执行：**
 ```sql
 SELECT id, service_name FROM t_service 
 WHERE id = '{serviceId}' AND is_deleted = 0 LIMIT 1;
 ```
 
-使用 `mysql-open` MCP 服务查询数据库，获取服务名供后续文档生成使用。
+使用 `mysql-open` MCP 服务查询数据库，获取服务名供文档生成使用。查询失败或 serviceId 为空时，使用默认服务名或询问用户。
 
 ### 步骤 3：生成本地化 SQL 脚本
 
-自动生成包含以下 6 条语句的 SQL 脚本：
+自动生成包含以下 6 条语句的 SQL 脚本（1 条添加应用 + 1 条添加分组 + 每个接口 1 条 t_interface + 每个接口 1 条 t_route）：
 
 **1. 添加应用 (t_app)**
 ```sql
@@ -135,6 +181,8 @@ INSERT INTO `open`.`t_route`
 VALUES 
 ('{routeId}', '{interfaceId}', '{接口路径}', '{接口路径}', NULL, '{请求方法}', '{接口中文名}', NULL, '', '', NULL, NULL, 0, NULL, NOW(), NULL, NOW(), 0, NULL);
 ```
+
+**说明：** `{接口编码}` = `{method小写}_{path_slug}`（如 `post_external_getfolders`）；`{interfaceId}` / `{routeId}` 取自步骤 1 响应。
 
 ### 步骤 4：生成授权请求
 
@@ -172,6 +220,8 @@ curl --location --request POST 'http://trialos.test.com/api/open/operate/interfa
 }'
 ```
 
+**说明：** 每个接口生成一条 authRequest，按顺序填充各自的 interfaceId。
+
 ### 步骤 5：生成测试 curl
 
 **环境配置表：**
@@ -203,6 +253,8 @@ curl --location --request POST 'https://trial-openapi.hengrui.com/api/{appCode}{
 --header 'Content-Type: application/json' \
 --data '{}'
 ```
+
+**说明：** GET 请求不带 body；POST 请求带 `--data '{}'`。UAT / PROD 环境各生成一份，按接口逐个填充 `{appCode}{接口路径}`。
 
 ### 步骤 6：自动创建 Confluence 文档
 
@@ -264,10 +316,21 @@ curl --location --request POST 'https://trial-openapi.hengrui.com/api/{appCode}{
 
 | 错误类型 | 处理方案 |
 |--------|--------|
-| API 批量导入失败 | 显示具体错误，停止并提示修正 |
+| 批量导入时 serviceId 为空/不存在 | 接口组ID不存在，提示用户补充或修正后重试 |
+| 批量导入时 userId 为空/不存在 | 用户ID不存在，提示用户补充或修正后重试 |
+| API 批量导入失败（code != 0） | 显示 message，停止并提示修正 |
+| 批量导入响应顺序与请求不一致 | 按响应中接口路径/method 对应回接口 |
 | 数据库查询失败 | 显示错误，使用默认服务名或让用户输入 |
 | Confluence 操作失败 | 显示错误，提示检查权限或格式 |
 | 清单更新失败 | 显示错误，提示手动检查页面格式 |
+
+---
+
+## 注意事项
+
+- **阶段一只生成 curl 命令，不执行任何调用**；收到用户回传的完整 curl 后才进入阶段二
+- Windows PowerShell 中 `curl` 是 `Invoke-WebRequest` 的别名，Linux 风格 curl（含 `\` 续行）无法直接运行；执行时转换为 `Invoke-WebRequest` 或使用 `curl.exe`（可用 Git Bash / WSL）
+- 若用户在阶段二中途只回传部分信息（如缺 appId），先询问补齐再继续，不要用占位符生成 SQL
 
 ---
 
